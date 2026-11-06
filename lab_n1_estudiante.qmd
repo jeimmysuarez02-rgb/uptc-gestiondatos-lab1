@@ -231,7 +231,9 @@ validez <- validos |>
     # str_detect() no devuelva NA y pueda contarse como incumplimiento.
     # El patrón exige: algo, una @, algo, un punto y al menos dos letras.
     correo_valido = str_detect(coalesce(correo, ""),
-                               "^[^@[:space:]]+@[^@[:space:]]+\\.[a-z]{2,}$")
+                               "^[^@[:space:]]+@[^@[:space:]]+\\.[a-z]{2,}$"),    telefono_valido = str_length(str_remove_all(coalesce(as.character(telefono), ""), "[^0-9]")) == 10,
+    genero_valido   = coalesce(as.character(genero), "") %in% c("F", "M"),
+    monto_valido    = !is.na(suppressWarnings(as.numeric(as.character(monto_ultima_donacion))))
 
     # TODO: telefono_valido  -> ¿tiene 10 dígitos una vez quitas todo lo que no sea número?
     # TODO: genero_valido    -> ¿el valor está dentro de un dominio aceptable?
@@ -342,17 +344,56 @@ parsear_fecha <- function(x) {
   salida   # lo que la función devuelve
 }
 
+correo_limpio <- function(x) {
+  x <- tolower(trimws(coalesce(as.character(x), "")))
+  if_else(str_detect(x, "^[^@[:space:]]+@[^@[:space:]]+\\.[a-z]{2,}$"), x, NA_character_)
+}
+
+telefono_limpio <- function(x) {
+  t <- str_remove_all(coalesce(as.character(x), ""), "[^0-9]")
+  t <- if_else(str_detect(t, "^57\\d{10}$"), str_sub(t, 3), t)
+  if_else(str_length(t) == 10, t, NA_character_)
+}
+
+ciudad_limpia <- function(x) {
+  x <- coalesce(as.character(x), "") |>
+    sin_tilde() |> tolower() |>
+    str_replace_all("[^a-z ]", " ") |> str_squish()
+  case_when(
+    x == ""                  ~ NA_character_,
+    str_detect(x, "^bog")    ~ "Bogotá",
+    str_detect(x, "^medell") ~ "Medellín",
+    TRUE                     ~ str_to_title(x)
+  )
+}
+
+genero_limpio <- function(x) {
+  x <- coalesce(as.character(x), "") |> sin_tilde() |> tolower() |> str_squish()
+  case_when(
+    str_detect(x, "^(f|mujer)") ~ "F",
+    str_detect(x, "^(m|h)")     ~ "M",
+    TRUE                        ~ NA_character_
+  )
+}
+
+limpiar_monto <- function(x) {
+  if (is.numeric(x)) return(x)
+  x <- str_remove_all(coalesce(as.character(x), ""), "[$[:space:]]")
+  x <- if_else(str_detect(x, "^\\d{1,3}([.,]\\d{3})+$"), str_remove_all(x, "[.,]"), x)
+  suppressWarnings(as.numeric(x))
+}
+
 final <- validos |>
   transmute(
-    contacto_id     = trimws(id),
-    nombre_completo = str_squish(nombre_completo),   # colapsa espacios múltiples en uno
-    fecha_ingreso   = parsear_fecha(fecha_de_ingreso)
-
-    # TODO: correo   -> minúsculas, y NA si no tiene formato válido
-    # TODO: telefono -> sólo dígitos, quita el prefijo 57, NA si no quedan 10
-    # TODO: ciudad   -> unifica las variantes en un solo valor por ciudad
-    # TODO: genero   -> unifica a F / M / NA
-    # TODO: monto_ultima_donacion -> numérico
+    contacto_id           = trimws(id),
+    id_repetido           = duplicated(contacto_id) | duplicated(contacto_id, fromLast = TRUE),
+    nombre_completo       = str_squish(nombre_completo),
+    fecha_ingreso         = parsear_fecha(fecha_de_ingreso),
+    correo                = correo_limpio(correo),
+    telefono              = telefono_limpio(telefono),
+    ciudad                = ciudad_limpia(ciudad),
+    genero                = genero_limpio(genero),
+    monto_ultima_donacion = limpiar_monto(monto_ultima_donacion)
   )
 
 cat("Registros tras limpieza:", nrow(final), "\n")
@@ -367,6 +408,37 @@ Defiende tu decisión ante una directora que pide «una base limpia para el vier
 # TODO 3.3 — Construye una tabla ANTES vs DESPUÉS de al menos cuatro indicadores.
 #            Sugerencia: % de correos válidos, formas distintas de escribir la ciudad,
 #            % de montos numéricos, formatos de fecha distintos.
+patron_correo <- "^[^@[:space:]]+@[^@[:space:]]+\\.[a-z]{2,}$"
+
+# Cuenta cuántos de los 3 formatos de fecha aparecen en el texto original
+formatos_fecha_antes <- function(x) {
+  x <- trimws(coalesce(as.character(x), ""))
+  sum(c(any(str_detect(x, "^\\d{2}/\\d{2}/\\d{4}$")),
+        any(str_detect(x, "^\\d{4}-\\d{2}-\\d{2}$")),
+        any(str_detect(x, "^\\d{2}-[a-z]{3}-\\d{2}$"))))
+}
+
+antes_despues <- tibble(
+  indicador = c("Correos válidos (%)", "Formas distintas de escribir la ciudad",
+                "Montos numéricos (%)", "Formatos de fecha distintos",
+                "Teléfonos válidos (%)"),
+  antes = c(
+    round(100 * mean(str_detect(coalesce(validos$correo, ""), patron_correo)), 1),
+    n_distinct(validos$ciudad, na.rm = TRUE),
+    round(100 * mean(!is.na(suppressWarnings(as.numeric(as.character(validos$monto_ultima_donacion))))), 1),
+    formatos_fecha_antes(validos$fecha_de_ingreso),
+    round(100 * mean(str_length(str_remove_all(coalesce(as.character(validos$telefono), ""), "[^0-9]")) == 10), 1)
+  ),
+  despues = c(
+    round(100 * mean(!is.na(final$correo)), 1),
+    n_distinct(final$ciudad, na.rm = TRUE),
+    round(100 * mean(!is.na(final$monto_ultima_donacion)), 1),
+    1,   # la columna ahora es de tipo fecha: un solo formato
+    round(100 * mean(!is.na(final$telefono)), 1)
+  )
+)
+
+kable(antes_despues)
 ```
 
 **Pregunta 3.4.** Revisa el porcentaje de correos válidos antes y después. ¿Subió? ¿Qué
@@ -387,6 +459,34 @@ código; parte sólo la puede completar el negocio.
 #
 #            Útiles: names() para los campos, sapply(final, class) para los tipos,
 #            n_distinct() para los valores únicos.
+diccionario <- tibble(
+  campo           = names(final),
+  tipo            = unname(sapply(final, function(x) class(x)[1])),
+  completitud_pct = unname(sapply(final, function(x) round(100 * mean(!vacio(x)), 1))),
+  valores_unicos  = unname(sapply(final, n_distinct)),
+  ejemplo         = unname(sapply(final, function(x) as.character(x[!vacio(x)][1]))),
+  descripcion = c(
+    "Identificador único del contacto",
+    "Marca TRUE si el ID aparece más de una vez y requiere revisión",
+    "Nombre completo del donante",
+    "Fecha en que el contacto ingresó a la base",
+    "Correo electrónico del donante",
+    "Teléfono celular de 10 dígitos, sin prefijo",
+    "Ciudad de residencia, escrita de una sola forma",
+    "Género del donante",
+    "Valor de la última donación, en pesos"
+  ),
+  dominio_permitido = c(
+    "CT- seguido de 5 dígitos", "TRUE / FALSE", "Texto libre",
+    "Fecha válida (aaaa-mm-dd)", "Formato usuario@dominio.ext",
+    "10 dígitos numéricos",
+    "Una de 10 ciudades: Bogotá, Medellín, Cali, Barranquilla, Cartagena, Bucaramanga, Tunja, Pereira, Manizales, Villavicencio",
+    "F / M", "Número mayor o igual a 0"
+  ),
+  responsable = "Por asignar (hoy nadie es dueño del dato)"
+)
+
+kable(diccionario)
 ```
 
 **Pregunta 4.2.** ¿Qué columna de tu diccionario **no puedes completar tú solo**? ¿Qué
@@ -408,6 +508,31 @@ eso.** El objetivo no es llegar al nivel 5: es llegar al **nivel 2**.
 #            Al menos una debe atacar la causa EN EL ORIGEN, no el síntoma.
 #
 #            Sugerencia: arma un tibble() con esas columnas y muéstralo con kable().
+plan <- tibble(
+  prioridad = 1:5,
+  accion = c(
+    "Nombrar un dueño del dato de donantes",
+    "Fijar reglas de captura en el origen: listas cerradas para ciudad y género, y validación de correo y teléfono al digitar",
+    "Aprobar un diccionario de datos versión 1 con el dueño",
+    "Guardar un solo archivo vigente en una carpeta compartida con respaldo, en lugar de contactos_FINAL_v3 en un computador",
+    "Ejecutar el script de limpieza cada mes y publicar el porcentaje de completitud y validez"
+  ),
+  por_que_ahora = c(
+    "Sin dueño nadie decide qué es válido ni responde por el dato",
+    "Ataca la causa en el origen: si el dato entra bien, casi no hay que limpiarlo",
+    "Hoy las definiciones solo están en la cabeza de Marcela",
+    "El tablero se rompe porque el archivo cambia de forma y de lugar",
+    "Hace visible la calidad y permite ver si mejora"
+  ),
+  responsable_propuesto = c(
+    "Dirección de Desarrollo", "Marcela, con apoyo de quien administre TI",
+    "Dueño del dato y Marcela", "Marcela y quien administre TI",
+    "Analista de datos"
+  ),
+  plazo = c("2 semanas", "1 mes", "3 semanas", "1 mes", "2 meses")
+)
+
+kable(plan)
 ```
 
 **Pregunta 5.2.** Si sólo pudieras ejecutar **una** de tus acciones, ¿cuál eliges y por qué?
